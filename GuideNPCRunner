@@ -1,0 +1,438 @@
+-- GuideNPCRunner.lua 
+
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local Players             = game:GetService("Players")
+
+local Config     = require(ReplicatedStorage.Config)
+local GridSystem = require(ServerScriptService.GridSystem)
+local AStarPathfinder = require(ServerScriptService.AStarPathfinder)
+local JPSPathfinder   = require(ServerScriptService.JPSPathfinder)
+
+local GRID_WIDTH = Config.GRID_WIDTH
+local GRID_DEPTH = Config.GRID_DEPTH
+
+-- ========== REMOTE EVENTS ==========
+local guideEvent = Instance.new("RemoteEvent")
+guideEvent.Name   = "GuideNPCEvent"
+guideEvent.Parent = ReplicatedStorage
+
+local guideCommand = Instance.new("RemoteEvent")
+guideCommand.Name   = "GuideNPCCommand"
+guideCommand.Parent = ReplicatedStorage
+
+-- ========== KONSTANTA ==========
+local GUIDE_WALK_SPEED = 12
+local WAIT_DISTANCE    = 60
+local RESUME_DISTANCE  = 25
+local MAX_WAIT_PLAYER  = 100
+local NPC_Y_OFFSET     = 3
+local GUIDE_COLOR      = BrickColor.new("Bright orange")
+
+-- Sama persis dengan Config di NPCMover
+local NPC_STEP_WAIT    = Config.NPC_STEP_WAIT  -- jeda antar node (sama dengan simulator)
+
+-- Label tujuan untuk player
+local SCENARIO_LABELS = {
+	Default = "Menuju Puncak (Utama)",
+	S1      = "Menuju Puncak",
+	S2      = "Menuju Camp 1",
+	S3      = "Dari Lembah Menuju Puncak",
+	S4      = "Turun ke Basecamp",
+}
+
+-- ========== STATE ==========
+local activeGuides = {}
+local guideNPCCount = 0  -- hitung NPC aktif untuk kelola InvisibleBridge
+
+-- ========== INVISIBLE BRIDGE (sama dengan GameManager) ==========
+local PhysicsService = game:GetService("PhysicsService")
+pcall(function()
+	PhysicsService:RegisterCollisionGroup("GuideNPCs")
+	PhysicsService:CollisionGroupSetCollidable("GuideNPCs", "InvisibleBridge", false)
+end)
+
+local function showInvisibleBridge()
+	local walkable = workspace.Map:FindFirstChild("Walkable")
+	if not walkable then return end
+	for _, part in ipairs(walkable:GetDescendants()) do
+		if part:IsA("BasePart") and part.Name == "InvisibleBridge" then
+			part.CanCollide   = true
+			part.Transparency = 1
+		end
+	end
+end
+
+local function hideInvisibleBridgeIfEmpty()
+	if guideNPCCount <= 0 then
+		guideNPCCount = 0
+		-- Hanya sembunyikan kalau simulator admin juga tidak sedang aktif
+		-- (biarkan GameManager yang atur kalau admin sedang pakai)
+	end
+end
+
+-- ========== CACHE PATH DARI SIMULATOR ADMIN ==========
+local cachedPaths = {}
+
+local function storePath(scenKey, algo, path)
+	local key = (scenKey or "Default") .. "_" .. algo
+	-- Simpan deep copy agar tidak terpengaruh perubahan di luar
+	local copy = {}
+	for _, node in ipairs(path) do
+		table.insert(copy, { x = node.x, z = node.z })
+	end
+	cachedPaths[key] = copy
+	print("[GuideNPC] Cache disimpan: " .. key .. " | " .. #copy .. " node")
+end
+
+local function getBestCachedPath(scenKey)
+	local sk    = scenKey or "Default"
+	local pathA = cachedPaths[sk .. "_AStar"]
+	local pathJ = cachedPaths[sk .. "_JPS"]
+	if pathA and pathJ then
+		-- Pilih yang lebih sedikit node (lebih optimal)
+		return (#pathA <= #pathJ) and pathA or pathJ,
+		(#pathA <= #pathJ) and "AStar" or "JPS"
+	elseif pathA then return pathA, "AStar"
+	elseif pathJ  then return pathJ, "JPS"
+	end
+	return nil, nil
+end
+
+-- BindableFunction agar GameManager bisa panggil storePath lintas-script
+local storePathBindable = Instance.new("BindableFunction")
+storePathBindable.Name     = "GuideNPCStorePath"
+storePathBindable.Parent   = ServerScriptService
+storePathBindable.OnInvoke = function(scenKey, algo, path)
+	storePath(scenKey, algo, path)
+end
+
+-- ========== FALLBACK: HITUNG PATH SENDIRI ==========
+local function waitForGrid()
+	local grid
+	local waited = 0
+	repeat
+		grid = GridSystem.getGrid()
+		if not grid then task.wait(0.5) end
+		waited += 0.5
+	until grid or waited >= 60
+	return grid
+end
+
+local function copyGrid(grid)
+	local copy = {}
+	for x = 1, GRID_WIDTH do
+		copy[x] = {}
+		for z = 1, GRID_DEPTH do
+			copy[x][z] = grid[x][z]
+		end
+	end
+	return copy
+end
+
+local function chooseFastestPath(startX, startZ, goalX, goalZ, grid)
+	local g = copyGrid(grid)
+	g[startX][startZ] = 0
+	g[goalX][goalZ]   = 0
+	local t1    = os.clock()
+	local pathA = AStarPathfinder.findPath(startX, startZ, goalX, goalZ, g, GRID_WIDTH, GRID_DEPTH)
+	local t1end = os.clock() - t1
+	local t2    = os.clock()
+	local pathJ = JPSPathfinder.findPath(startX, startZ, goalX, goalZ, g, GRID_WIDTH, GRID_DEPTH)
+	local t2end = os.clock() - t2
+	print(string.format("[GuideNPC Fallback] A*:%.2fms | JPS:%.2fms", t1end*1000, t2end*1000))
+	if pathA and pathJ then
+		return (t1end <= t2end) and pathA or pathJ,
+		(t1end <= t2end) and "AStar" or "JPS"
+	elseif pathA then return pathA, "AStar"
+	elseif pathJ  then return pathJ, "JPS"
+	end
+	return nil, nil
+end
+
+-- ========== JARAK NPC KE PLAYER ==========
+local function distToPlayer(npc, player)
+	local char = player.Character
+	if not char then return math.huge end
+	local nr = npc:FindFirstChild("HumanoidRootPart")
+	local pr = char:FindFirstChild("HumanoidRootPart")
+	if not nr or not pr then return math.huge end
+	return (nr.Position - pr.Position).Magnitude
+end
+
+-- ========== SPAWN NPC (tanpa visualisasi marker) ==========
+local function spawnGuideNPC(player, startPart)
+	-- Hapus NPC lama kalau ada
+	local old = activeGuides[player]
+	if old and old.npc and old.npc.Parent then
+		old.active = false
+		old.npc:Destroy()
+	end
+
+	local dummy = game.ServerStorage:FindFirstChild("NPCDummy")
+	if not dummy then
+		warn("[GuideNPC] NPCDummy tidak ditemukan di ServerStorage!")
+		return nil
+	end
+
+	local npc = dummy:Clone()
+	npc.Name  = "GuideNPC_" .. player.Name
+
+	-- Warna orange agar beda dari NPC simulator
+	for _, part in ipairs(npc:GetDescendants()) do
+		if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+			part.BrickColor = GUIDE_COLOR
+			part.CanCollide = false
+		end
+	end
+
+	local root = npc:FindFirstChild("HumanoidRootPart")
+	if root then
+		-- Billboard label: "🧭 Pemandu (username)"
+		local bb = Instance.new("BillboardGui")
+		bb.Size        = UDim2.new(0, 180, 0, 40)
+		bb.StudsOffset = Vector3.new(0, 3, 0)
+		bb.Parent      = root
+
+		local lbl = Instance.new("TextLabel")
+		lbl.Size                   = UDim2.new(1, 0, 1, 0)
+		lbl.BackgroundTransparency = 1
+		lbl.TextColor3             = Color3.fromRGB(255, 200, 50)
+		lbl.Text                   = "🧭 Pemandu (" .. player.Name .. ")"
+		lbl.TextSize               = 13
+		lbl.Font                   = Enum.Font.GothamBold
+		lbl.TextStrokeTransparency = 0.5
+		lbl.Parent                 = bb
+
+		root.CanCollide   = true
+		-- ✅ Masukkan ke collision group agar bisa lewat InvisibleBridge
+		PhysicsService:SetPartCollisionGroup(root, "GuideNPCs")
+
+		root.CFrame = CFrame.new(
+			startPart.Position.X,
+			startPart.Position.Y + NPC_Y_OFFSET,
+			startPart.Position.Z
+		)
+	end
+
+	local humanoid = npc:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.WalkSpeed = GUIDE_WALK_SPEED
+		-- ✅ Sembunyikan nama bawaan Roblox di atas NPC
+		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	end
+
+	local npcFolder = workspace:FindFirstChild("NPCs")
+	if not npcFolder then
+		npcFolder        = Instance.new("Folder")
+		npcFolder.Name   = "NPCs"
+		npcFolder.Parent = workspace
+	end
+	npc.Parent = npcFolder
+	return npc
+end
+
+-- ========== IKUTI PATH PERSIS SEPERTI NPCMover.followPath ==========
+-- Tidak ada marker, tidak ada chunk — node per node sama dengan simulator
+local function followPathLikeSimulator(npc, path, state, player, destLabel)
+	local humanoid = npc:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+
+	task.spawn(function()
+		for i, node in ipairs(path) do
+			if not state.active or not npc.Parent then break end
+
+			-- ===== TUNGGU PLAYER KALAU KETINGGALAN =====
+			if distToPlayer(npc, player) > WAIT_DISTANCE then
+				local nr = npc:FindFirstChild("HumanoidRootPart")
+				if nr then humanoid:MoveTo(nr.Position) end -- berhenti di tempat
+
+				local waitedTime = 0
+				while distToPlayer(npc, player) > RESUME_DISTANCE do
+					if not state.active or not npc.Parent then break end
+
+					-- Hadap ke player saat menunggu
+					local char = player.Character
+					local nr2  = npc:FindFirstChild("HumanoidRootPart")
+					if char and nr2 then
+						local pr = char:FindFirstChild("HumanoidRootPart")
+						if pr then
+							nr2.CFrame = CFrame.lookAt(
+								nr2.Position,
+								Vector3.new(pr.Position.X, nr2.Position.Y, pr.Position.Z)
+							)
+						end
+					end
+
+					task.wait(0.3)
+					waitedTime += 0.3
+					if waitedTime >= MAX_WAIT_PLAYER then
+						guideEvent:FireClient(player, "Status", "Pemandu menunggu terlalu lama.")
+						state.active = false
+						break
+					end
+				end
+				if not state.active then break end
+			end
+
+			-- ===== GERAK KE NODE — PERSIS SEPERTI NPCMover =====
+			local worldPos = GridSystem.gridToWorld(node.x, node.z)
+			humanoid:MoveTo(Vector3.new(worldPos.X, worldPos.Y + NPC_Y_OFFSET, worldPos.Z))
+			humanoid.MoveToFinished:Wait()
+			task.wait(NPC_STEP_WAIT)
+		end
+
+		-- Selesai
+		if state.active and npc.Parent then
+			guideEvent:FireClient(player, "Arrived", destLabel)
+			print("[GuideNPC] Sampai tujuan: " .. destLabel)
+			task.wait(5)
+		end
+		if npc.Parent then npc:Destroy() end
+		guideNPCCount = math.max(0, guideNPCCount - 1)
+		hideInvisibleBridgeIfEmpty()
+		activeGuides[player] = nil
+	end)
+end
+
+-- ========== JALANKAN NPC PEMANDU ==========
+local function runGuideNPC(player, scenarioKey)
+	local waypointsFolder = workspace:FindFirstChild("Waypoints")
+	if not waypointsFolder then
+		guideEvent:FireClient(player, "Error", "Waypoints tidak ditemukan!")
+		return
+	end
+
+	local startName = "Start"
+	local goalName  = "Goal"
+	if scenarioKey and Config.SCENARIOS[scenarioKey] then
+		startName = Config.SCENARIOS[scenarioKey].startName
+		goalName  = Config.SCENARIOS[scenarioKey].goalName
+	end
+
+	local startPart = waypointsFolder:FindFirstChild(startName)
+	local goalPart  = waypointsFolder:FindFirstChild(goalName)
+	if not startPart or not goalPart then
+		guideEvent:FireClient(player, "Error", "Waypoint tidak ditemukan!")
+		return
+	end
+
+	local destLabel = SCENARIO_LABELS[scenarioKey or "Default"] or "Tujuan"
+	guideEvent:FireClient(player, "Status", "Mencari jalur " .. destLabel .. "...")
+
+	-- ✅ Ambil path dari cache simulator admin (jalur SAMA PERSIS)
+	local path, algo = getBestCachedPath(scenarioKey)
+
+	if path then
+		print(string.format("[GuideNPC] ✅ Pakai cache admin | %s | %s | %d node",
+			scenarioKey or "Default", algo, #path))
+	else
+		-- Fallback jika admin belum jalankan skenario ini
+		warn("[GuideNPC] ⚠ Cache kosong untuk '" .. (scenarioKey or "Default") ..
+			"'. Jalankan simulator admin dulu!")
+		local grid = waitForGrid()
+		if not grid then
+			guideEvent:FireClient(player, "Error", "Grid belum siap, coba lagi!")
+			return
+		end
+		local startX, startZ = GridSystem.worldToGrid(startPart.Position)
+		local goalX,  goalZ  = GridSystem.worldToGrid(goalPart.Position)
+		startX = math.clamp(startX, 1, GRID_WIDTH)
+		startZ = math.clamp(startZ, 1, GRID_DEPTH)
+		goalX  = math.clamp(goalX,  1, GRID_WIDTH)
+		goalZ  = math.clamp(goalZ,  1, GRID_DEPTH)
+		path, algo = chooseFastestPath(startX, startZ, goalX, goalZ, grid)
+	end
+
+	if not path or #path == 0 then
+		guideEvent:FireClient(player, "Error", "Jalur tidak ditemukan!")
+		return
+	end
+
+	-- Spawn NPC di posisi Start yang sama dengan simulator
+	local npc = spawnGuideNPC(player, startPart)
+	if not npc then return end
+
+	local state = { npc = npc, active = true }
+	activeGuides[player] = state
+	guideNPCCount += 1
+	showInvisibleBridge()  -- ✅ aktifkan jembatan seperti simulator admin
+
+	local algoLabel = algo == "AStar" and "A*" or "JPS"
+	guideEvent:FireClient(player, "Started", algo, #path, destLabel)
+	print(string.format("[GuideNPC] %s → %s | %s | %d node",
+		player.Name, destLabel, algoLabel, #path))
+
+	-- Ikuti path persis seperti simulator, tanpa marker
+	followPathLikeSimulator(npc, path, state, player, destLabel)
+end
+
+-- ========== PROXIMITY PROMPT ==========
+local function setupProximityPrompts()
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("BasePart") and (
+			obj.Name == "GuideStation_Basecamp" or
+				obj.Name == "GuideStation_Lembah" or
+				obj.Name == "GuideStation_Puncak"
+			) then
+			local existing = obj:FindFirstChildOfClass("ProximityPrompt")
+			if existing then existing:Destroy() end
+
+			local prompt = Instance.new("ProximityPrompt")
+			prompt.ObjectText            = "Pemandu Jalan"
+			prompt.ActionText            = "Pilih Tujuan"
+			prompt.KeyboardKeyCode       = Enum.KeyCode.E
+			prompt.HoldDuration          = 0.3
+			prompt.MaxActivationDistance = 10
+			prompt.Parent                = obj
+
+			prompt.Triggered:Connect(function(player)
+				if activeGuides[player] and activeGuides[player].active then
+					guideEvent:FireClient(player, "Status", "Pemandu sedang aktif!")
+					return
+				end
+				-- Kirim nama station agar client tahu opsi mana yang ditampilkan
+				guideEvent:FireClient(player, "OpenMenu", obj.Name)
+			end)
+			print("[GuideNPCRunner] ProximityPrompt terpasang: " .. obj:GetFullName())
+		end
+	end
+end
+
+-- ========== COMMAND DARI CLIENT ==========
+guideCommand.OnServerEvent:Connect(function(player, cmd, param)
+	if cmd == "Start" then
+		if activeGuides[player] and activeGuides[player].active then
+			guideEvent:FireClient(player, "Status", "Pemandu sedang aktif!")
+			return
+		end
+		task.spawn(function() runGuideNPC(player, param) end)
+
+	elseif cmd == "Stop" then
+		local s = activeGuides[player]
+		if s then
+			s.active = false
+			if s.npc and s.npc.Parent then s.npc:Destroy() end
+			guideNPCCount = math.max(0, guideNPCCount - 1)
+			hideInvisibleBridgeIfEmpty()
+			activeGuides[player] = nil
+			guideEvent:FireClient(player, "Status", "Pemandu dihentikan.")
+		end
+	end
+end)
+
+-- ========== CLEANUP SAAT PLAYER KELUAR ==========
+Players.PlayerRemoving:Connect(function(player)
+	local s = activeGuides[player]
+	if s then
+		s.active = false
+		if s.npc and s.npc.Parent then s.npc:Destroy() end
+		guideNPCCount = math.max(0, guideNPCCount - 1)
+		hideInvisibleBridgeIfEmpty()
+		activeGuides[player] = nil
+	end
+end)
+
+-- ========== INIT ==========
+task.wait(2)
+setupProximityPrompts()
