@@ -1,0 +1,119 @@
+-- AStarPathfinder.lua
+local AStarPathfinder = {}
+
+-- ========== HEURISTIC (Octile Distance) ==========
+local function heuristic(x1, z1, x2, z2)
+	local dx = math.abs(x1 - x2)
+	local dz = math.abs(z1 - z2)
+	return (dx + dz) + (math.sqrt(2) - 2) * math.min(dx, dz)
+end
+
+-- ========== REKONSTRUKSI JALUR ==========
+-- Fix: pattern (-?%d+) agar bisa handle koordinat negatif
+local function reconstructPath(cameFrom, currentKey)
+	local path = {}
+	local key = currentKey
+	while cameFrom[key] do
+		local x, z = key:match("(-?%d+),(-?%d+)")
+		table.insert(path, 1, {x = tonumber(x), z = tonumber(z)})
+		key = cameFrom[key]
+	end
+	local x, z = key:match("(-?%d+),(-?%d+)")
+	table.insert(path, 1, {x = tonumber(x), z = tonumber(z)})
+	return path
+end
+
+-- ========== CARI TETANGGA ==========
+local function getNeighbors(x, z, grid, gridW, gridD)
+	local neighbors = {}
+	local dirs = {
+		{dx=0,  dz=1,  cost=1},
+		{dx=0,  dz=-1, cost=1},
+		{dx=1,  dz=0,  cost=1},
+		{dx=-1, dz=0,  cost=1},
+		{dx=1,  dz=1,  cost=1.414},
+		{dx=-1, dz=1,  cost=1.414},
+		{dx=1,  dz=-1, cost=1.414},
+		{dx=-1, dz=-1, cost=1.414},
+	}
+	for _, dir in ipairs(dirs) do
+		local nx = x + dir.dx
+		local nz = z + dir.dz
+		if nx >= 1 and nx <= gridW and nz >= 1 and nz <= gridD then
+			if grid[nx][nz] == 0 then
+				table.insert(neighbors, {x=nx, z=nz, cost=dir.cost})
+			end
+		end
+	end
+	return neighbors
+end
+
+-- ========== ALGORITMA A* UTAMA ==========
+function AStarPathfinder.findPath(startX, startZ, goalX, goalZ, grid, gridW, gridD)
+	local openSet       = {}
+	local closedSet     = {}
+	local gScore        = {}
+	local fScore        = {}
+	local cameFrom      = {}
+	local nodesExplored = 0
+
+	local startKey = startX .. "," .. startZ
+	local goalKey  = goalX  .. "," .. goalZ
+
+	gScore[startKey] = 0
+	fScore[startKey] = heuristic(startX, startZ, goalX, goalZ)
+	table.insert(openSet, {x = startX, z = startZ, f = fScore[startKey]})
+
+	while #openSet > 0 do
+		local lowestIdx = 1
+		for i = 2, #openSet do
+			if openSet[i].f < openSet[lowestIdx].f then
+				lowestIdx = i
+			end
+		end
+
+		local current    = openSet[lowestIdx]
+		local currentKey = current.x .. "," .. current.z
+		nodesExplored    = nodesExplored + 1
+
+		if currentKey == goalKey then
+			return reconstructPath(cameFrom, currentKey), nodesExplored
+		end
+
+		table.remove(openSet, lowestIdx)
+		closedSet[currentKey] = true
+
+		local neighbors = getNeighbors(current.x, current.z, grid, gridW, gridD)
+		for _, neighbor in ipairs(neighbors) do
+			local neighborKey = neighbor.x .. "," .. neighbor.z
+			if not closedSet[neighborKey] then
+				local tentativeG = (gScore[currentKey] or math.huge) + neighbor.cost
+				if not gScore[neighborKey] or tentativeG < gScore[neighborKey] then
+					cameFrom[neighborKey] = currentKey
+					gScore[neighborKey]   = tentativeG
+					fScore[neighborKey]   = tentativeG + heuristic(neighbor.x, neighbor.z, goalX, goalZ)
+
+					local inOpen = false
+					for _, n in ipairs(openSet) do
+						if n.x == neighbor.x and n.z == neighbor.z then
+							n.f    = fScore[neighborKey]
+							inOpen = true
+							break
+						end
+					end
+					if not inOpen then
+						table.insert(openSet, {
+							x = neighbor.x,
+							z = neighbor.z,
+							f = fScore[neighborKey],
+						})
+					end
+				end
+			end
+		end
+	end
+
+	return nil, nodesExplored
+end
+
+return AStarPathfinder
