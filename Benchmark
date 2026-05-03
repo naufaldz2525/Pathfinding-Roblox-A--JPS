@@ -1,0 +1,61 @@
+-- Benchmark.lua
+local Benchmark = {}
+Benchmark.results = {}
+
+-- ========== MULAI PENGUKURAN ==========
+function Benchmark.start()
+	return {
+		startTime = os.clock(),
+	}
+end
+
+-- ========== SELESAI PENGUKURAN ==========
+-- MODIFIKASI: Tambah parameter nodesExplored, hapus memUsed
+function Benchmark.finish(data, path, algorithmName, scenarioName, nodesExplored)
+	local endTime     = os.clock()a
+	local execTime    = (endTime - data.startTime) * 1000  -- ms
+	local pathLength  = path and #path or 0
+	nodesExplored     = nodesExplored or 0
+
+	local result = {
+		algorithm     = algorithmName,
+		scenario      = scenarioName,
+		execTime      = execTime,
+		pathLength    = pathLength,
+		nodesExplored = nodesExplored,
+	}
+
+	table.insert(Benchmark.results, result)
+
+	print(string.format(
+		"[%s | %s] Waktu: %.4f ms | Panjang Jalur: %d node | Node Dieksplorasi: %d node",
+		algorithmName, scenarioName, execTime, pathLength, nodesExplored
+		))
+
+	return result
+end
+
+-- ========== TAMPILKAN SEMUA HASIL ==========
+function Benchmark.printAll()
+	print("\n===== REKAP HASIL BENCHMARK =====")
+	for _, r in ipairs(Benchmark.results) do
+		print(string.format(
+			"[%s | %s] %.4f ms | Jalur: %d node | Eksplorasi: %d node",
+			r.algorithm, r.scenario, r.execTime, r.pathLength, r.nodesExplored
+			))
+	end
+	print("=================================\n")
+end
+
+-- ========== RESET ==========
+function Benchmark.reset()
+	Benchmark.results = {}
+	print("[Benchmark] Reset.")
+end
+
+-- ========== AMBIL HASIL TERAKHIR ==========
+function Benchmark.getLastResult()
+	return Benchmark.results[#Benchmark.results]
+end
+
+return Benchmark
