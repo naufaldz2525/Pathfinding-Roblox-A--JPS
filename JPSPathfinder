@@ -1,0 +1,240 @@
+-- JPSPathfinder.lua (FIXED)
+
+local JPSPathfinder = {}
+
+-- ========== HEURISTIC (Octile Distance) ==========
+local function heuristic(x1, z1, x2, z2)
+	local dx = math.abs(x1 - x2)
+	local dz = math.abs(z1 - z2)
+	return (dx + dz) + (math.sqrt(2) - 2) * math.min(dx, dz)
+end
+
+-- ========== CEK WALKABLE ==========
+local function isWalkable(grid, x, z, gridW, gridD)
+	if x < 1 or x > gridW or z < 1 or z > gridD then return false end
+	return grid[x][z] == 0
+end
+
+-- ========== REKONSTRUKSI JALUR  ==========
+local function reconstructPath(cameFrom, currentKey)
+	local path = {}
+	local key = currentKey
+	while key do
+		local x, z = key:match("(-?%d+),(-?%d+)")
+		table.insert(path, 1, { x = tonumber(x), z = tonumber(z) })
+		key = cameFrom[key]
+	end
+	return path
+end
+
+-- ========== EKSPANSI JALUR ==========
+-- Mengisi node-node di antara dua jump point agar panjang jalur
+-- sebanding dengan A* (yang menyimpan setiap node).
+local function expandPath(path)
+	if not path or #path == 0 then return path end
+
+	local fullPath = {}
+
+	for i = 1, #path - 1 do
+		local a = path[i]
+		local b = path[i + 1]
+
+		-- Tambahkan titik awal segmen
+		table.insert(fullPath, { x = a.x, z = a.z })
+
+		-- Tentukan arah dari a ke b
+		local dx, dz = 0, 0
+		if b.x ~= a.x then dx = (b.x - a.x) / math.abs(b.x - a.x) end
+		if b.z ~= a.z then dz = (b.z - a.z) / math.abs(b.z - a.z) end
+
+		-- Isi semua node di antara a dan b (tidak termasuk b)
+		local cx, cz = a.x + dx, a.z + dz
+		while cx ~= b.x or cz ~= b.z do
+			table.insert(fullPath, { x = cx, z = cz })
+			cx = cx + dx
+			cz = cz + dz
+		end
+	end
+
+	-- Tambahkan node terakhir (goal)
+	table.insert(fullPath, { x = path[#path].x, z = path[#path].z })
+
+	return fullPath
+end
+
+-- ========== JUMP ==========
+local function jump(grid, x, z, dx, dz, goalX, goalZ, gridW, gridD)
+	if not isWalkable(grid, x, z, gridW, gridD) then return nil end
+	if x == goalX and z == goalZ then return x, z end
+
+	if dx ~= 0 and dz ~= 0 then
+		-- Diagonal: cek forced neighbor
+		if (isWalkable(grid, x - dx, z + dz, gridW, gridD) and not isWalkable(grid, x - dx, z, gridW, gridD)) or
+			(isWalkable(grid, x + dx, z - dz, gridW, gridD) and not isWalkable(grid, x, z - dz, gridW, gridD)) then
+			return x, z
+		end
+		-- Rekursif ke komponen horizontal dan vertikal
+		if jump(grid, x + dx, z, dx, 0, goalX, goalZ, gridW, gridD) then return x, z end
+		if jump(grid, x, z + dz, 0, dz, goalX, goalZ, gridW, gridD) then return x, z end
+	elseif dx ~= 0 then
+		-- Horizontal: cek forced neighbor atas/bawah
+		if (isWalkable(grid, x + dx, z + 1, gridW, gridD) and not isWalkable(grid, x, z + 1, gridW, gridD)) or
+			(isWalkable(grid, x + dx, z - 1, gridW, gridD) and not isWalkable(grid, x, z - 1, gridW, gridD)) then
+			return x, z
+		end
+	else
+		-- Vertikal: cek forced neighbor kiri/kanan
+		if (isWalkable(grid, x + 1, z + dz, gridW, gridD) and not isWalkable(grid, x + 1, z, gridW, gridD)) or
+			(isWalkable(grid, x - 1, z + dz, gridW, gridD) and not isWalkable(grid, x - 1, z, gridW, gridD)) then
+			return x, z
+		end
+	end
+
+	if isWalkable(grid, x + dx, z + dz, gridW, gridD) then
+		return jump(grid, x + dx, z + dz, dx, dz, goalX, goalZ, gridW, gridD)
+	end
+	return nil
+end
+
+-- ========== PRUNED DIRECTIONS ==========
+local function getPrunedDirections(grid, x, z, dx, dz, gridW, gridD)
+	local dirs = {}
+
+	if dx ~= 0 and dz ~= 0 then
+		-- DIAGONAL
+		if isWalkable(grid, x + dx, z, gridW, gridD) then table.insert(dirs, {dx, 0}) end
+		if isWalkable(grid, x, z + dz, gridW, gridD) then table.insert(dirs, {0, dz}) end
+		if isWalkable(grid, x + dx, z + dz, gridW, gridD) then table.insert(dirs, {dx, dz}) end
+		if not isWalkable(grid, x - dx, z, gridW, gridD) and isWalkable(grid, x, z + dz, gridW, gridD) then
+			table.insert(dirs, {-dx, dz})
+		end
+		if not isWalkable(grid, x, z - dz, gridW, gridD) and isWalkable(grid, x + dx, z, gridW, gridD) then
+			table.insert(dirs, {dx, -dz})
+		end
+	elseif dx ~= 0 then
+		-- HORIZONTAL
+		if isWalkable(grid, x + dx, z, gridW, gridD) then table.insert(dirs, {dx, 0}) end
+		if not isWalkable(grid, x, z + 1, gridW, gridD) and isWalkable(grid, x + dx, z + 1, gridW, gridD) then
+			table.insert(dirs, {dx, 1})
+		end
+		if not isWalkable(grid, x, z - 1, gridW, gridD) and isWalkable(grid, x + dx, z - 1, gridW, gridD) then
+			table.insert(dirs, {dx, -1})
+		end
+	else
+		-- VERTIKAL
+		if isWalkable(grid, x, z + dz, gridW, gridD) then table.insert(dirs, {0, dz}) end
+		if not isWalkable(grid, x + 1, z, gridW, gridD) and isWalkable(grid, x + 1, z + dz, gridW, gridD) then
+			table.insert(dirs, {1, dz})
+		end
+		if not isWalkable(grid, x - 1, z, gridW, gridD) and isWalkable(grid, x - 1, z + dz, gridW, gridD) then
+			table.insert(dirs, {-1, dz})
+		end
+	end
+
+	return dirs
+end
+
+-- ========== IDENTIFY SUCCESSORS ==========
+local function identifySuccessors(
+	grid, x, z, dx, dz,
+	goalX, goalZ, gridW, gridD,
+	openSet, gScore, fScore, cameFrom, nodesExplored
+)
+	local dirs
+	if dx == 0 and dz == 0 then
+		-- Start node: eksplorasi semua 8 arah
+		dirs = {
+			{1,0},{-1,0},{0,1},{0,-1},
+			{1,1},{1,-1},{-1,1},{-1,-1}
+		}
+	else
+		dirs = getPrunedDirections(grid, x, z, dx, dz, gridW, gridD)
+	end
+
+	local currentKey = x .. "," .. z
+
+	for _, dir in ipairs(dirs) do
+		local jx, jz = jump(grid, x + dir[1], z + dir[2], dir[1], dir[2], goalX, goalZ, gridW, gridD)
+		if jx then
+			nodesExplored[1] = nodesExplored[1] + 1
+			local jumpKey    = jx .. "," .. jz
+			local d          = math.sqrt((jx - x)^2 + (jz - z)^2)
+			local tentativeG = (gScore[currentKey] or math.huge) + d
+
+			if not gScore[jumpKey] or tentativeG < gScore[jumpKey] then
+				cameFrom[jumpKey] = currentKey
+				gScore[jumpKey]   = tentativeG
+				fScore[jumpKey]   = tentativeG + heuristic(jx, jz, goalX, goalZ)
+
+				local inOpen = false
+				for _, n in ipairs(openSet) do
+					if n.x == jx and n.z == jz then
+						n.f  = fScore[jumpKey]
+						n.dx = dir[1]
+						n.dz = dir[2]
+						inOpen = true
+						break
+					end
+				end
+				if not inOpen then
+					table.insert(openSet, {
+						x  = jx,   z  = jz,
+						f  = fScore[jumpKey],
+						dx = dir[1], dz = dir[2],
+					})
+				end
+			end
+		end
+	end
+end
+
+-- ========== ALGORITMA JPS UTAMA ==========
+function JPSPathfinder.findPath(startX, startZ, goalX, goalZ, grid, gridW, gridD)
+	local openSet       = {}
+	local closedSet     = {}
+	local gScore        = {}
+	local fScore        = {}
+	local cameFrom      = {}
+	local nodesExplored = {0}
+
+	local startKey = startX .. "," .. startZ
+	gScore[startKey] = 0
+	fScore[startKey] = heuristic(startX, startZ, goalX, goalZ)
+
+	table.insert(openSet, {
+		x = startX, z = startZ,
+		f = fScore[startKey],
+		dx = 0, dz = 0,
+	})
+
+	while #openSet > 0 do
+		local lowestIdx = 1
+		for i = 2, #openSet do
+			if openSet[i].f < openSet[lowestIdx].f then lowestIdx = i end
+		end
+
+		local current    = openSet[lowestIdx]
+		local currentKey = current.x .. "," .. current.z
+
+		if current.x == goalX and current.z == goalZ then
+			-- Rekonstruksi jump points lalu ekspansi ke jalur penuh
+			local rawPath  = reconstructPath(cameFrom, currentKey)
+			local fullPath = expandPath(rawPath)
+			return fullPath, nodesExplored[1]
+		end
+
+		table.remove(openSet, lowestIdx)
+		closedSet[currentKey] = true
+
+		identifySuccessors(
+			grid, current.x, current.z,
+			current.dx, current.dz,
+			goalX, goalZ, gridW, gridD,
+			openSet, gScore, fScore, cameFrom, nodesExplored
+		)
+	end
+
+	return nil, nodesExplored[1]
+end
+
+return JPSPathfinder
