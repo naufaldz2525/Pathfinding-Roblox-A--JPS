@@ -1,0 +1,42 @@
+-- CommandHandler (LocalScript di StarterPlayerScripts)
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Buat RemoteEvents untuk komunikasi Client → Server
+local function getOrCreate(name)
+	local existing = ReplicatedStorage:FindFirstChild(name)
+	if existing then return existing end
+	local re = Instance.new("RemoteEvent")
+	re.Name = name
+	re.Parent = ReplicatedStorage
+	return re
+end
+
+local commandEvent = getOrCreate("PathfinderCommand")
+
+-- ========== FUNGSI COMMAND (dipanggil dari Command Bar) ==========
+function RunAStar()
+	commandEvent:FireServer("AStar")
+end
+
+function RunJPS()
+	commandEvent:FireServer("JPS")
+end
+
+function RunBoth()
+	commandEvent:FireServer("Both")
+end
+
+function ToggleGrid()
+	commandEvent:FireServer("ToggleGrid")
+end
+
+function ResetAll()
+	commandEvent:FireServer("Reset")
+end
+
+function ShowResults()
+	commandEvent:FireServer("ShowResults")
+end
+
+wprint("Command Handler siap! Ketik RunAStar(), RunJPS(), RunBoth(), ToggleGrid(), ResetAll(), ShowResults()")
