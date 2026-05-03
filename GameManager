@@ -1,0 +1,292 @@
+local Config          = require(game.ReplicatedStorage.Config)
+local GridSystem      = require(game.ServerScriptService.GridSystem)
+local AStarPathfinder = require(game.ServerScriptService.AStarPathfinder)
+local JPSPathfinder   = require(game.ServerScriptService.JPSPathfinder)
+local NPCMover        = require(game.ServerScriptService.NPCMover)
+local Benchmark       = require(game.ServerScriptService.Benchmark)
+local storePathBindable = game.ServerScriptService:WaitForChild("GuideNPCStorePath", 30)
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PhysicsService    = game:GetService("PhysicsService")
+
+local SHOW_DEBUG_GRID = false
+local GRID_WIDTH      = Config.GRID_WIDTH
+local GRID_DEPTH      = Config.GRID_DEPTH
+
+-- ========== REMOTE EVENTS ==========
+local commandEvent = Instance.new("RemoteEvent")
+commandEvent.Name   = "PathfinderCommand"
+commandEvent.Parent = ReplicatedStorage
+
+local resultEvent = Instance.new("RemoteEvent")
+resultEvent.Name   = "PathfinderResult"
+resultEvent.Parent = ReplicatedStorage
+
+-- ========== STATE ==========
+local cachedGrid = nil
+local gridReady  = false
+local activeNPCs = 0
+
+-- ========== COLLISION GROUPS ==========
+pcall(function()
+	PhysicsService:RegisterCollisionGroup("Players")
+	PhysicsService:RegisterCollisionGroup("InvisibleBridge")
+	PhysicsService:CollisionGroupSetCollidable("Players", "InvisibleBridge", false)
+end)
+
+local function showInvisibleBridge()
+	local walkable = workspace.Map:FindFirstChild("Walkable")
+	if not walkable then return end
+	for _, part in ipairs(walkable:GetDescendants()) do
+		if part:IsA("BasePart") and part.Name == "InvisibleBridge" then
+			part.CanCollide     = true
+			part.Transparency   = 1
+			part.CollisionGroup = "InvisibleBridge"
+		end
+	end
+end
+
+local function hideInvisibleBridge()
+	local walkable = workspace.Map:FindFirstChild("Walkable")
+	if not walkable then return end
+	for _, part in ipairs(walkable:GetDescendants()) do
+		if part:IsA("BasePart") and part.Name == "InvisibleBridge" then
+			part.CanCollide     = false
+			part.Transparency   = 1
+			part.CollisionGroup = "InvisibleBridge"
+		end
+	end
+end
+
+-- ========== COPY GRID ==========
+local function copyGrid(grid)
+	local copy = {}
+	for x = 1, GRID_WIDTH do
+		copy[x] = {}
+		for z = 1, GRID_DEPTH do
+			copy[x][z] = grid[x][z]
+		end
+	end
+	return copy
+end
+
+-- ========== DAPATKAN START & GOAL ==========
+local function getStartGoal(scenarioKey)
+	local waypointsFolder = workspace:FindFirstChild("Waypoints")
+	if not waypointsFolder then
+		warn("Folder 'Waypoints' tidak ditemukan di workspace!")
+		return nil
+	end
+
+	local startName, goalName
+	if scenarioKey and Config.SCENARIOS[scenarioKey] then
+		startName = Config.SCENARIOS[scenarioKey].startName
+		goalName  = Config.SCENARIOS[scenarioKey].goalName
+	else
+		startName = "Start"
+		goalName  = "Goal"
+	end
+
+	local startPart = waypointsFolder:FindFirstChild(startName)
+	local goalPart  = waypointsFolder:FindFirstChild(goalName)
+
+	if not startPart then
+		warn("Waypoint '" .. startName .. "' tidak ditemukan di workspace.Waypoints!")
+		return nil
+	end
+	if not goalPart then
+		warn("Waypoint '" .. goalName .. "' tidak ditemukan di workspace.Waypoints!")
+		return nil
+	end
+
+	local startX, startZ = GridSystem.worldToGrid(startPart.Position)
+	local goalX,  goalZ  = GridSystem.worldToGrid(goalPart.Position)
+
+	startX = math.clamp(startX, 1, GRID_WIDTH)
+	startZ = math.clamp(startZ, 1, GRID_DEPTH)
+	goalX  = math.clamp(goalX,  1, GRID_WIDTH)
+	goalZ  = math.clamp(goalZ,  1, GRID_DEPTH)
+
+	return startX, startZ, goalX, goalZ
+end
+
+-- ========== RUN PATHFINDING + NPC ==========
+local function runWithNPC(algorithmName, color, scenarioKey)
+	local startX, startZ, goalX, goalZ = getStartGoal(scenarioKey)
+	if not startX then return end
+
+	local scenLabel = (scenarioKey and Config.SCENARIOS[scenarioKey])
+		and Config.SCENARIOS[scenarioKey].label
+		or "Map Utama"
+
+	activeNPCs = activeNPCs + 1
+	showInvisibleBridge()
+
+	local npc = NPCMover.spawnNPC(startX, startZ, algorithmName, color)
+	if not npc then
+		activeNPCs = activeNPCs - 1
+		if activeNPCs <= 0 then activeNPCs = 0; hideInvisibleBridge() end
+		return
+	end
+
+	local waited = 0
+	while not gridReady and waited < 30 do
+		task.wait(0.1)
+		waited = waited + 0.1
+	end
+
+	if not gridReady then
+		warn("Grid timeout!")
+		npc:Destroy()
+		activeNPCs = activeNPCs - 1
+		if activeNPCs <= 0 then activeNPCs = 0; hideInvisibleBridge() end
+		return
+	end
+
+	local grid_copy = copyGrid(cachedGrid)
+	grid_copy[startX][startZ] = 0
+	grid_copy[goalX][goalZ]   = 0
+
+	local benchData = Benchmark.start()
+	local path, nodesExplored
+
+	if algorithmName == "AStar" then
+		path, nodesExplored = AStarPathfinder.findPath(
+			startX, startZ, goalX, goalZ, grid_copy, GRID_WIDTH, GRID_DEPTH
+		)
+	elseif algorithmName == "JPS" then
+		path, nodesExplored = JPSPathfinder.findPath(
+			startX, startZ, goalX, goalZ, grid_copy, GRID_WIDTH, GRID_DEPTH
+		)
+	end
+
+	-- MODIFIKASI: Teruskan nodesExplored ke Benchmark.finish
+	local result = Benchmark.finish(benchData, path, algorithmName, scenLabel, nodesExplored)
+
+	-- Simpan path ke GuideNPC via BindableFunction
+	if path and storePathBindable then
+		storePathBindable:Invoke(scenarioKey, algorithmName, path)
+	end
+
+	if path then
+		print(string.format("[%s | %s] %d node dieksplorasi | Jalur: %d node",
+			algorithmName, scenLabel, nodesExplored or 0, #path))
+
+		NPCMover.followPath(npc, path, algorithmName, function()
+			print("[" .. algorithmName .. "] NPC sampai tujuan!")
+			activeNPCs = activeNPCs - 1
+			if activeNPCs <= 0 then
+				activeNPCs = 0
+				hideInvisibleBridge()
+			end
+		end)
+
+		-- MODIFIKASI: Kirim nodesExplored sebagai parameter ke-4 (ganti memUsed)
+		resultEvent:FireAllClients(algorithmName, result.execTime, result.pathLength, result.nodesExplored, scenLabel)
+	else
+		print("[" .. algorithmName .. "] Jalur tidak ditemukan!")
+		npc:Destroy()
+		activeNPCs = activeNPCs - 1
+		if activeNPCs <= 0 then
+			activeNPCs = 0
+			hideInvisibleBridge()
+		end
+		resultEvent:FireAllClients(algorithmName .. "_Failed", 0, 0, 0, scenLabel)
+	end
+end
+
+-- ========== COMMAND LISTENER ==========
+commandEvent.OnServerEvent:Connect(function(player, command, param)
+	print(string.format("[Command] %s: %s %s", player.Name, tostring(command), tostring(param or "")))
+
+	if command == "AStar" then
+		task.spawn(function()
+			runWithNPC("AStar", BrickColor.new("Bright blue"), param)
+		end)
+
+	elseif command == "JPS" then
+		task.spawn(function()
+			runWithNPC("JPS", BrickColor.new("Bright red"), param)
+		end)
+
+	elseif command == "Both" then
+		task.spawn(function()
+			runWithNPC("AStar", BrickColor.new("Bright blue"), param)
+		end)
+		task.spawn(function()
+			runWithNPC("JPS", BrickColor.new("Bright red"), param)
+		end)
+
+	elseif command == "ToggleGrid" then
+		SHOW_DEBUG_GRID = not SHOW_DEBUG_GRID
+		if SHOW_DEBUG_GRID and cachedGrid then
+			GridSystem.visualizeGrid(cachedGrid, GRID_WIDTH, GRID_DEPTH)
+		else
+			local dg = workspace:FindFirstChild("DebugGrid")
+			if dg then dg:Destroy() end
+		end
+
+	elseif command == "TogglePathAStar" then
+		local pv = workspace:FindFirstChild("PathVisual_AStar")
+		if pv then
+			pv.Parent = pv.Parent == workspace
+				and game.ServerStorage
+				or  workspace
+		end
+
+	elseif command == "TogglePathJPS" then
+		local pv = workspace:FindFirstChild("PathVisual_JPS")
+			or game.ServerStorage:FindFirstChild("PathVisual_JPS")
+		if pv then
+			pv.Parent = pv.Parent == workspace
+				and game.ServerStorage
+				or  workspace
+		end
+
+	elseif command == "Reset" then
+		hideInvisibleBridge()
+		activeNPCs = 0
+
+		local npcs = workspace:FindFirstChild("NPCs")
+		if npcs then
+			for _, npc in ipairs(npcs:GetChildren()) do npc:Destroy() end
+		end
+		for _, algo in ipairs({"AStar", "JPS"}) do
+			local pv = workspace:FindFirstChild("PathVisual_" .. algo)
+			if pv then pv:Destroy() end
+		end
+		local dg = workspace:FindFirstChild("DebugGrid")
+		if dg then dg:Destroy() end
+
+		Benchmark.reset()
+		cachedGrid = nil
+		gridReady  = false
+		resultEvent:FireAllClients("Reset", 0, 0, 0, "")
+
+		task.spawn(function()
+			cachedGrid = GridSystem.createGrid(GRID_WIDTH, GRID_DEPTH)
+			cachedGrid = GridSystem.scanMap(cachedGrid, GRID_WIDTH, GRID_DEPTH)
+			gridReady  = true
+			GridSystem.setGrid(cachedGrid, GRID_WIDTH, GRID_DEPTH)
+			print("Grid siap!")
+			resultEvent:FireAllClients("Ready", 0, 0, 0, "")
+		end)
+
+	elseif command == "ShowResults" then
+		Benchmark.printAll()
+	end
+end)
+
+-- ========== INISIALISASI GRID ==========
+hideInvisibleBridge()
+
+task.spawn(function()
+	task.wait(1)
+	print("Scanning grid...")
+	cachedGrid = GridSystem.createGrid(GRID_WIDTH, GRID_DEPTH)
+	cachedGrid = GridSystem.scanMap(cachedGrid, GRID_WIDTH, GRID_DEPTH)
+	gridReady  = true
+	GridSystem.setGrid(cachedGrid, GRID_WIDTH, GRID_DEPTH)
+	print("Grid siap! (" .. GRID_WIDTH .. "x" .. GRID_DEPTH .. ")")
+	resultEvent:FireAllClients("Ready", 0, 0, 0, "")
+end)
