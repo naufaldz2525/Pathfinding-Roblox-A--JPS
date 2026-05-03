@@ -1,0 +1,165 @@
+-- GridSystem.lua (versi Raycast)
+
+local Config = require(game.ReplicatedStorage.Config)
+local GridSystem = {}
+
+-- ========== PENYIMPANAN GRID INTERNAL ==========
+-- Diisi oleh GameManager setelah grid selesai di-scan
+local _storedGrid  = nil
+local _storedGridW = nil
+local _storedGridD = nil
+
+-- Dipanggil oleh GameManager setelah scanMap selesai
+function GridSystem.setGrid(grid, gridW, gridD)
+	_storedGrid  = grid
+	_storedGridW = gridW
+	_storedGridD = gridD
+end
+
+-- Dipanggil oleh NPCGuard untuk mengambil grid
+-- Return: grid, gridW, gridD
+function GridSystem.getGrid()
+	return _storedGrid, _storedGridW, _storedGridD
+end
+
+-- ========== BUAT GRID KOSONG ==========
+function GridSystem.createGrid(gridW, gridD)
+	local grid = {}
+	for x = 1, gridW do
+		grid[x] = {}
+		for z = 1, gridD do
+			grid[x][z] = 0
+		end
+	end
+	return grid
+end
+
+-- ========== KONVERSI GRID → DUNIA ROBLOX ==========
+function GridSystem.gridToWorld(x, z, yOverride)
+	local origin = Config.MAP_ORIGIN
+	local cs = Config.CELL_SIZE
+	local worldX = origin.X + (x - 0.5) * cs
+	local worldZ = origin.Z + (z - 0.5) * cs
+
+	-- Raycast ke bawah untuk dapat Y yang tepat
+	local rayOrigin = Vector3.new(worldX, 500, worldZ)
+	local rayDir = Vector3.new(0, -1000, 0)
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	local excluded = {}
+	local dg = workspace:FindFirstChild("DebugGrid")
+	local pv = workspace:FindFirstChild("PathVisual")
+	if dg then table.insert(excluded, dg) end
+	if pv then table.insert(excluded, pv) end
+	raycastParams.FilterDescendantsInstances = excluded
+
+	local result = workspace:Raycast(rayOrigin, rayDir, raycastParams)
+	local worldY = yOverride or (result and result.Position.Y + 0.5 or 0.5)
+
+	return Vector3.new(worldX, worldY, worldZ)
+end
+
+-- ========== KONVERSI DUNIA ROBLOX → GRID ==========
+function GridSystem.worldToGrid(worldPos)
+	local origin = Config.MAP_ORIGIN
+	local cs = Config.CELL_SIZE
+	local x = math.floor((worldPos.X - origin.X) / cs) + 1
+	local z = math.floor((worldPos.Z - origin.Z) / cs) + 1
+	return x, z
+end
+
+-- ========== SCAN MAP ==========
+function GridSystem.scanMap(grid, gridW, gridD)
+	local walkableFolder = workspace.Map:FindFirstChild("Walkable")
+	local obstacleFolder = workspace.Map:FindFirstChild("Obstacles")
+
+	if walkableFolder then
+		print("Walkable folder ditemukan! Isi: " .. #walkableFolder:GetDescendants() .. " objects")
+	end
+
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	raycastParams.RespectCanCollide = false
+	local excluded = {}
+	local debugGrid = workspace:FindFirstChild("DebugGrid")
+	local pathVisual = workspace:FindFirstChild("PathVisual")
+	if debugGrid then table.insert(excluded, debugGrid) end
+	if pathVisual then table.insert(excluded, pathVisual) end
+	raycastParams.FilterDescendantsInstances = excluded
+
+	for x = 1, gridW do
+		for z = 1, gridD do
+			local origin = Config.MAP_ORIGIN
+			local cs = Config.CELL_SIZE
+			local worldX = origin.X + (x - 0.5) * cs
+			local worldZ = origin.Z + (z - 0.5) * cs
+
+			local rayOrigin = Vector3.new(worldX, 2000, worldZ)
+			local rayDir    = Vector3.new(0, -5000, 0)
+
+			local result = workspace:Raycast(rayOrigin, rayDir, raycastParams)
+
+			-- Default semua obstacle
+			grid[x][z] = 1
+
+			if result then
+				local hitInstance = result.Instance
+
+				-- Cek apakah kena Part di folder Walkable
+				if walkableFolder then
+					local current = hitInstance
+					while current do
+						if current == walkableFolder then
+							grid[x][z] = 0  -- walkable!
+							break
+						end
+						current = current.Parent
+					end
+				end
+			end
+		end
+	end
+
+	return grid
+end
+
+-- ========== DEBUG VISUAL ==========
+function GridSystem.visualizeGrid(grid, gridW, gridD)
+	local debugFolder = workspace:FindFirstChild("DebugGrid")
+	if debugFolder then debugFolder:Destroy() end
+
+	debugFolder = Instance.new("Folder")
+	debugFolder.Name = "DebugGrid"
+	debugFolder.Parent = workspace
+
+	for x = 1, gridW do
+		for z = 1, gridD do
+			local worldPos = GridSystem.gridToWorld(x, z)
+
+			local part = Instance.new("Part")
+			part.Size = Vector3.new(Config.CELL_SIZE - 0.2, 0.3, Config.CELL_SIZE - 0.2)
+			part.Position = Vector3.new(worldPos.X, worldPos.Y + 0.2, worldPos.Z)
+			part.Anchored = true
+			part.CanCollide = false
+			part.Material = Enum.Material.Neon
+			part.Transparency = 0.4
+
+			if grid[x][z] == 1 then
+				part.BrickColor = BrickColor.new("Bright red")
+			else
+				part.BrickColor = BrickColor.new("Bright green")
+			end
+
+			part.Parent = debugFolder
+		end
+	end
+end
+
+-- ========== CEK WALKABLE ==========
+function GridSystem.isWalkable(grid, x, z, gridW, gridD)
+	if x < 1 or x > gridW then return false end
+	if z < 1 or z > gridD then return false end
+	return grid[x][z] == 0
+end
+
+return GridSystem
