@@ -1,0 +1,571 @@
+
+-- PathfinderUI.lua (LocalScript)
+-- MODIFIKASI: Hapus Memori, tampilkan Panjang Jalur + Node Dieksplorasi
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players           = game:GetService("Players")
+
+-- ========== CEK AKSES ==========
+local ALLOWED_USERS = { "naufaaldz", "scoofieldz" }
+local localPlayer   = Players.LocalPlayer
+
+local function isAllowed()
+	for _, name in ipairs(ALLOWED_USERS) do
+		if localPlayer.Name:lower() == name:lower() then return true end
+	end
+	return false
+end
+
+if not isAllowed() then
+	print("Akses ditolak: " .. localPlayer.Name)
+	return
+end
+print("Akses diberikan: " .. localPlayer.Name)
+
+-- ========== REMOTE EVENTS ==========
+local commandEvent = ReplicatedStorage:WaitForChild("PathfinderCommand", 30)
+local resultEvent  = ReplicatedStorage:WaitForChild("PathfinderResult",  30)
+if not commandEvent or not resultEvent then
+	warn("RemoteEvent tidak ditemukan!")
+	return
+end
+
+local screenGui = script.Parent
+
+-- ========== STATE ==========
+local selectedScenario = nil
+local gridVisible      = false
+local pathAstarVisible = true
+local pathJPSVisible   = true
+
+-- ========== HELPER ==========
+local function addCorner(parent, radius)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, radius or 8)
+	c.Parent = parent
+end
+
+-- ========== TOMBOL TOGGLE PANEL ==========
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size              = UDim2.new(0, 40, 0, 40)
+toggleBtn.Position          = UDim2.new(0, 10, 0.5, -20)
+toggleBtn.BackgroundColor3  = Color3.fromRGB(200, 50, 50)
+toggleBtn.TextColor3        = Color3.fromRGB(255, 255, 255)
+toggleBtn.Text              = "x"
+toggleBtn.TextSize          = 20
+toggleBtn.Font              = Enum.Font.GothamBold
+toggleBtn.BorderSizePixel   = 0
+toggleBtn.ZIndex            = 10
+toggleBtn.Parent            = screenGui
+addCorner(toggleBtn)
+
+-- ========== PANEL KONTROL ==========
+local ctrlFrame = Instance.new("Frame")
+ctrlFrame.Size             = UDim2.new(0, 220, 0.85, 0)
+ctrlFrame.Position         = UDim2.new(0, 60, 0.075, 0)
+ctrlFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+ctrlFrame.BorderSizePixel  = 0
+ctrlFrame.Visible          = true
+ctrlFrame.Parent           = screenGui
+addCorner(ctrlFrame, 10)
+
+local ctrlTitle = Instance.new("TextLabel")
+ctrlTitle.Size             = UDim2.new(1, 0, 0, 40)
+ctrlTitle.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+ctrlTitle.TextColor3       = Color3.fromRGB(255, 255, 255)
+ctrlTitle.Text             = "Pathfinder Simulator"
+ctrlTitle.TextSize         = 14
+ctrlTitle.Font             = Enum.Font.GothamBold
+ctrlTitle.ZIndex           = 2
+ctrlTitle.Parent           = ctrlFrame
+addCorner(ctrlTitle, 10)
+
+local scrollFrame = Instance.new("ScrollingFrame")
+scrollFrame.Size                   = UDim2.new(1, 0, 1, -40)
+scrollFrame.Position               = UDim2.new(0, 0, 0, 40)
+scrollFrame.BackgroundTransparency = 1
+scrollFrame.BorderSizePixel        = 0
+scrollFrame.ScrollBarThickness     = 4
+scrollFrame.ScrollBarImageColor3   = Color3.fromRGB(120, 120, 120)
+scrollFrame.AutomaticCanvasSize    = Enum.AutomaticSize.Y
+scrollFrame.CanvasSize             = UDim2.new(0, 0, 0, 0)
+scrollFrame.Parent                 = ctrlFrame
+
+-- ========== STATUS & LABEL ==========
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size               = UDim2.new(1, -20, 0, 30)
+statusLabel.Position           = UDim2.new(0, 10, 0, 4)
+statusLabel.BackgroundTransparency = 1
+statusLabel.TextColor3         = Color3.fromRGB(255, 200, 0)
+statusLabel.Text               = "Status: Memuat grid..."
+statusLabel.TextSize           = 12
+statusLabel.Font               = Enum.Font.Gotham
+statusLabel.TextXAlignment     = Enum.TextXAlignment.Left
+statusLabel.Parent             = scrollFrame
+
+local scenLabel = Instance.new("TextLabel")
+scenLabel.Size               = UDim2.new(1, -20, 0, 22)
+scenLabel.Position           = UDim2.new(0, 10, 0, 34)
+scenLabel.BackgroundTransparency = 1
+scenLabel.TextColor3         = Color3.fromRGB(150, 220, 255)
+scenLabel.Text               = "Titik: Default (Start/Goal)"
+scenLabel.TextSize           = 11
+scenLabel.Font               = Enum.Font.Gotham
+scenLabel.TextXAlignment     = Enum.TextXAlignment.Left
+scenLabel.Parent             = scrollFrame
+
+-- ========== BUAT TOMBOL AKSI ==========
+local function createButton(text, color, yPos, command, getParam)
+	local btn = Instance.new("TextButton")
+	btn.Size             = UDim2.new(1, -20, 0, 40)
+	btn.Position         = UDim2.new(0, 10, 0, yPos)
+	btn.BackgroundColor3 = color
+	btn.TextColor3       = Color3.fromRGB(255, 255, 255)
+	btn.Text             = text
+	btn.TextSize         = 13
+	btn.Font             = Enum.Font.GothamBold
+	btn.BorderSizePixel  = 0
+	btn.Parent           = scrollFrame
+	addCorner(btn)
+
+	btn.MouseButton1Click:Connect(function()
+		local param = getParam and getParam() or nil
+		statusLabel.Text       = "Status: Menjalankan " .. command .. "..."
+		statusLabel.TextColor3 = Color3.fromRGB(255, 200, 0)
+		commandEvent:FireServer(command, param)
+	end)
+	btn.MouseEnter:Connect(function()
+		btn.BackgroundColor3 = color:Lerp(Color3.fromRGB(255, 255, 255), 0.15)
+	end)
+	btn.MouseLeave:Connect(function()
+		btn.BackgroundColor3 = color
+	end)
+	return btn
+end
+
+createButton("Jalankan A*",       Color3.fromRGB(0, 100, 200),  60,  "AStar", function() return selectedScenario end)
+createButton("Jalankan JPS",      Color3.fromRGB(200, 50, 50),  108, "JPS",   function() return selectedScenario end)
+createButton("Jalankan Keduanya", Color3.fromRGB(150, 0, 200),  156, "Both",  function() return selectedScenario end)
+
+-- ========== PEMILIH SKENARIO ==========
+local sepLabel = Instance.new("TextLabel")
+sepLabel.Size               = UDim2.new(1, -20, 0, 20)
+sepLabel.Position           = UDim2.new(0, 10, 0, 204)
+sepLabel.BackgroundTransparency = 1
+sepLabel.TextColor3         = Color3.fromRGB(130, 130, 130)
+sepLabel.Text               = "── Pilih Titik Pengujian ──"
+sepLabel.TextSize           = 11
+sepLabel.Font               = Enum.Font.GothamBold
+sepLabel.Parent             = scrollFrame
+
+local scenarioButtons = {}
+local scenKeys        = { "S1", "S2", "S3", "S4" }
+local scenPositions   = {
+	{x = 10,  y = 228},
+	{x = 115, y = 228},
+	{x = 10,  y = 268},
+	{x = 115, y = 268},
+}
+
+local COLOR_SKEN_ACTIVE      = Color3.fromRGB(0, 140, 80)
+local COLOR_SKEN_INACTIVE    = Color3.fromRGB(55, 55, 55)
+local COLOR_DEFAULT_ACTIVE   = Color3.fromRGB(0, 100, 160)
+local COLOR_DEFAULT_INACTIVE = Color3.fromRGB(55, 55, 55)
+
+local defaultBtn = Instance.new("TextButton")
+defaultBtn.Size             = UDim2.new(1, -20, 0, 26)
+defaultBtn.Position         = UDim2.new(0, 10, 0, 310)
+defaultBtn.BackgroundColor3 = COLOR_DEFAULT_ACTIVE
+defaultBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+defaultBtn.Text             = "✔  Default (Start/Goal)"
+defaultBtn.TextSize         = 11
+defaultBtn.Font             = Enum.Font.GothamBold
+defaultBtn.BorderSizePixel  = 0
+defaultBtn.Parent           = scrollFrame
+addCorner(defaultBtn)
+
+local function updateScenarioUI()
+	for i, btn in ipairs(scenarioButtons) do
+		if selectedScenario == scenKeys[i] then
+			btn.BackgroundColor3 = COLOR_SKEN_ACTIVE
+			btn.Text = "✔ " .. scenKeys[i]
+		else
+			btn.BackgroundColor3 = COLOR_SKEN_INACTIVE
+			btn.Text = scenKeys[i]
+		end
+	end
+	if selectedScenario == nil then
+		defaultBtn.BackgroundColor3 = COLOR_DEFAULT_ACTIVE
+		defaultBtn.Text = "✔  Default (Start/Goal)"
+		scenLabel.Text  = "Titik: Default (Start/Goal)"
+	else
+		defaultBtn.BackgroundColor3 = COLOR_DEFAULT_INACTIVE
+		defaultBtn.Text = "Default (Start/Goal)"
+		scenLabel.Text  = "Titik: " .. selectedScenario
+	end
+end
+
+for i, key in ipairs(scenKeys) do
+	local pos = scenPositions[i]
+	local btn = Instance.new("TextButton")
+	btn.Size             = UDim2.new(0, 95, 0, 34)
+	btn.Position         = UDim2.new(0, pos.x, 0, pos.y)
+	btn.BackgroundColor3 = COLOR_SKEN_INACTIVE
+	btn.TextColor3       = Color3.fromRGB(255, 255, 255)
+	btn.Text             = key
+	btn.TextSize         = 12
+	btn.Font             = Enum.Font.GothamBold
+	btn.BorderSizePixel  = 0
+	btn.Parent           = scrollFrame
+	addCorner(btn)
+	table.insert(scenarioButtons, btn)
+	btn.MouseButton1Click:Connect(function()
+		selectedScenario = key
+		updateScenarioUI()
+	end)
+end
+
+defaultBtn.MouseButton1Click:Connect(function()
+	selectedScenario = nil
+	updateScenarioUI()
+end)
+updateScenarioUI()
+
+-- ========== GRID TOGGLE ==========
+local gridSepLabel = Instance.new("TextLabel")
+gridSepLabel.Size               = UDim2.new(1, -20, 0, 20)
+gridSepLabel.Position           = UDim2.new(0, 10, 0, 344)
+gridSepLabel.BackgroundTransparency = 1
+gridSepLabel.TextColor3         = Color3.fromRGB(130, 130, 130)
+gridSepLabel.Text               = "── Visualisasi Grid ──"
+gridSepLabel.TextSize           = 11
+gridSepLabel.Font               = Enum.Font.GothamBold
+gridSepLabel.Parent             = scrollFrame
+
+local gridYesBtn = Instance.new("TextButton")
+gridYesBtn.Size             = UDim2.new(0, 95, 0, 32)
+gridYesBtn.Position         = UDim2.new(0, 10, 0, 368)
+gridYesBtn.BackgroundColor3 = COLOR_SKEN_INACTIVE
+gridYesBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+gridYesBtn.Text             = "Tampilkan"
+gridYesBtn.TextSize         = 12
+gridYesBtn.Font             = Enum.Font.GothamBold
+gridYesBtn.BorderSizePixel  = 0
+gridYesBtn.Parent           = scrollFrame
+addCorner(gridYesBtn)
+
+local gridNoBtn = Instance.new("TextButton")
+gridNoBtn.Size             = UDim2.new(0, 95, 0, 32)
+gridNoBtn.Position         = UDim2.new(0, 115, 0, 368)
+gridNoBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 80)
+gridNoBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+gridNoBtn.Text             = "✔ Sembunyikan"
+gridNoBtn.TextSize         = 12
+gridNoBtn.Font             = Enum.Font.GothamBold
+gridNoBtn.BorderSizePixel  = 0
+gridNoBtn.Parent           = scrollFrame
+addCorner(gridNoBtn)
+
+local function updateGridToggleUI()
+	if gridVisible then
+		gridYesBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 80)
+		gridYesBtn.Text             = "✔ Tampilkan"
+		gridNoBtn.BackgroundColor3  = COLOR_SKEN_INACTIVE
+		gridNoBtn.Text              = "Sembunyikan"
+	else
+		gridYesBtn.BackgroundColor3 = COLOR_SKEN_INACTIVE
+		gridYesBtn.Text             = "Tampilkan"
+		gridNoBtn.BackgroundColor3  = Color3.fromRGB(0, 140, 80)
+		gridNoBtn.Text              = "✔ Sembunyikan"
+	end
+end
+
+gridYesBtn.MouseButton1Click:Connect(function()
+	if not gridVisible then
+		gridVisible = true
+		updateGridToggleUI()
+		commandEvent:FireServer("ToggleGrid")
+	end
+end)
+gridNoBtn.MouseButton1Click:Connect(function()
+	if gridVisible then
+		gridVisible = false
+		updateGridToggleUI()
+		commandEvent:FireServer("ToggleGrid")
+	end
+end)
+updateGridToggleUI()
+
+-- ========== TOGGLE JALUR A* ==========
+local pathAstarSep = Instance.new("TextLabel")
+pathAstarSep.Size               = UDim2.new(1, -20, 0, 20)
+pathAstarSep.Position           = UDim2.new(0, 10, 0, 408)
+pathAstarSep.BackgroundTransparency = 1
+pathAstarSep.TextColor3         = Color3.fromRGB(80, 160, 255)
+pathAstarSep.Text               = "── Jalur A* (Biru) ──"
+pathAstarSep.TextSize           = 11
+pathAstarSep.Font               = Enum.Font.GothamBold
+pathAstarSep.Parent             = scrollFrame
+
+local pathAstarShowBtn = Instance.new("TextButton")
+pathAstarShowBtn.Size             = UDim2.new(0, 95, 0, 32)
+pathAstarShowBtn.Position         = UDim2.new(0, 10, 0, 432)
+pathAstarShowBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
+pathAstarShowBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+pathAstarShowBtn.Text             = "✔ Tampilkan"
+pathAstarShowBtn.TextSize         = 12
+pathAstarShowBtn.Font             = Enum.Font.GothamBold
+pathAstarShowBtn.BorderSizePixel  = 0
+pathAstarShowBtn.Parent           = scrollFrame
+addCorner(pathAstarShowBtn)
+
+local pathAstarHideBtn = Instance.new("TextButton")
+pathAstarHideBtn.Size             = UDim2.new(0, 95, 0, 32)
+pathAstarHideBtn.Position         = UDim2.new(0, 115, 0, 432)
+pathAstarHideBtn.BackgroundColor3 = COLOR_SKEN_INACTIVE
+pathAstarHideBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+pathAstarHideBtn.Text             = "Sembunyikan"
+pathAstarHideBtn.TextSize         = 12
+pathAstarHideBtn.Font             = Enum.Font.GothamBold
+pathAstarHideBtn.BorderSizePixel  = 0
+pathAstarHideBtn.Parent           = scrollFrame
+addCorner(pathAstarHideBtn)
+
+local function updatePathAstarUI()
+	if pathAstarVisible then
+		pathAstarShowBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
+		pathAstarShowBtn.Text             = "✔ Tampilkan"
+		pathAstarHideBtn.BackgroundColor3 = COLOR_SKEN_INACTIVE
+		pathAstarHideBtn.Text             = "Sembunyikan"
+	else
+		pathAstarShowBtn.BackgroundColor3 = COLOR_SKEN_INACTIVE
+		pathAstarShowBtn.Text             = "Tampilkan"
+		pathAstarHideBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
+		pathAstarHideBtn.Text             = "✔ Sembunyikan"
+	end
+end
+
+pathAstarShowBtn.MouseButton1Click:Connect(function()
+	if not pathAstarVisible then
+		pathAstarVisible = true
+		updatePathAstarUI()
+		commandEvent:FireServer("TogglePathAStar")
+	end
+end)
+pathAstarHideBtn.MouseButton1Click:Connect(function()
+	if pathAstarVisible then
+		pathAstarVisible = false
+		updatePathAstarUI()
+		commandEvent:FireServer("TogglePathAStar")
+	end
+end)
+updatePathAstarUI()
+
+-- ========== TOGGLE JALUR JPS ==========
+local pathJPSSep = Instance.new("TextLabel")
+pathJPSSep.Size               = UDim2.new(1, -20, 0, 20)
+pathJPSSep.Position           = UDim2.new(0, 10, 0, 472)
+pathJPSSep.BackgroundTransparency = 1
+pathJPSSep.TextColor3         = Color3.fromRGB(255, 80, 80)
+pathJPSSep.Text               = "── Jalur JPS (Merah) ──"
+pathJPSSep.TextSize           = 11
+pathJPSSep.Font               = Enum.Font.GothamBold
+pathJPSSep.Parent             = scrollFrame
+
+local pathJPSShowBtn = Instance.new("TextButton")
+pathJPSShowBtn.Size             = UDim2.new(0, 95, 0, 32)
+pathJPSShowBtn.Position         = UDim2.new(0, 10, 0, 496)
+pathJPSShowBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+pathJPSShowBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+pathJPSShowBtn.Text             = "✔ Tampilkan"
+pathJPSShowBtn.TextSize         = 12
+pathJPSShowBtn.Font             = Enum.Font.GothamBold
+pathJPSShowBtn.BorderSizePixel  = 0
+pathJPSShowBtn.Parent           = scrollFrame
+addCorner(pathJPSShowBtn)
+
+local pathJPSHideBtn = Instance.new("TextButton")
+pathJPSHideBtn.Size             = UDim2.new(0, 95, 0, 32)
+pathJPSHideBtn.Position         = UDim2.new(0, 115, 0, 496)
+pathJPSHideBtn.BackgroundColor3 = COLOR_SKEN_INACTIVE
+pathJPSHideBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+pathJPSHideBtn.Text             = "Sembunyikan"
+pathJPSHideBtn.TextSize         = 12
+pathJPSHideBtn.Font             = Enum.Font.GothamBold
+pathJPSHideBtn.BorderSizePixel  = 0
+pathJPSHideBtn.Parent           = scrollFrame
+addCorner(pathJPSHideBtn)
+
+local function updatePathJPSUI()
+	if pathJPSVisible then
+		pathJPSShowBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+		pathJPSShowBtn.Text             = "✔ Tampilkan"
+		pathJPSHideBtn.BackgroundColor3 = COLOR_SKEN_INACTIVE
+		pathJPSHideBtn.Text             = "Sembunyikan"
+	else
+		pathJPSShowBtn.BackgroundColor3 = COLOR_SKEN_INACTIVE
+		pathJPSShowBtn.Text             = "Tampilkan"
+		pathJPSHideBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+		pathJPSHideBtn.Text             = "✔ Sembunyikan"
+	end
+end
+
+pathJPSShowBtn.MouseButton1Click:Connect(function()
+	if not pathJPSVisible then
+		pathJPSVisible = true
+		updatePathJPSUI()
+		commandEvent:FireServer("TogglePathJPS")
+	end
+end)
+pathJPSHideBtn.MouseButton1Click:Connect(function()
+	if pathJPSVisible then
+		pathJPSVisible = false
+		updatePathJPSUI()
+		commandEvent:FireServer("TogglePathJPS")
+	end
+end)
+updatePathJPSUI()
+
+-- ========== TOMBOL RESET ==========
+createButton("Reset", Color3.fromRGB(60, 60, 60), 536, "Reset")
+
+-- ========== PANEL HASIL ==========
+-- MODIFIKASI: Tinggi diperbesar untuk menampung 4 baris (tanpa Memori, tambah Node Dieksplorasi)
+local resFrame = Instance.new("Frame")
+resFrame.Size             = UDim2.new(0, 290, 0, 310)
+resFrame.Position         = UDim2.new(1, -300, 0, 10)
+resFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+resFrame.BorderSizePixel  = 0
+resFrame.Visible          = false
+resFrame.Parent           = screenGui
+addCorner(resFrame, 10)
+
+local resTitle = Instance.new("TextLabel")
+resTitle.Size             = UDim2.new(1, 0, 0, 40)
+resTitle.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+resTitle.TextColor3       = Color3.fromRGB(255, 255, 255)
+resTitle.Text             = "Hasil Pengujian"
+resTitle.TextSize         = 14
+resTitle.Font             = Enum.Font.GothamBold
+resTitle.Parent           = resFrame
+addCorner(resTitle, 10)
+
+local resScenarLabel = Instance.new("TextLabel")
+resScenarLabel.Size               = UDim2.new(1, -20, 0, 20)
+resScenarLabel.Position           = UDim2.new(0, 10, 0, 44)
+resScenarLabel.BackgroundTransparency = 1
+resScenarLabel.TextColor3         = Color3.fromRGB(150, 220, 255)
+resScenarLabel.Text               = "Titik: -"
+resScenarLabel.TextSize           = 11
+resScenarLabel.Font               = Enum.Font.Gotham
+resScenarLabel.TextXAlignment     = Enum.TextXAlignment.Left
+resScenarLabel.Parent             = resFrame
+
+-- MODIFIKASI: Block hasil sekarang 4 baris → tinggi 110
+local function makeResultBlock(label, color, yPos)
+	local bg = Instance.new("Frame")
+	bg.Size             = UDim2.new(1, -20, 0, 110)
+	bg.Position         = UDim2.new(0, 10, 0, yPos)
+	bg.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+	bg.BorderSizePixel  = 0
+	bg.Parent           = resFrame
+	addCorner(bg)
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size               = UDim2.new(1, -10, 0, 24)
+	lbl.Position           = UDim2.new(0, 8, 0, 4)
+	lbl.BackgroundTransparency = 1
+	lbl.TextColor3         = color
+	lbl.Text               = "= " .. label
+	lbl.TextSize           = 13
+	lbl.Font               = Enum.Font.GothamBold
+	lbl.TextXAlignment     = Enum.TextXAlignment.Left
+	lbl.Parent             = bg
+
+	local info = Instance.new("TextLabel")
+	info.Size               = UDim2.new(1, -10, 0, 76)
+	info.Position           = UDim2.new(0, 8, 0, 28)
+	info.BackgroundTransparency = 1
+	info.TextColor3         = Color3.fromRGB(200, 200, 200)
+	-- MODIFIKASI: default text tanpa Memori, tambah Dieksplorasi
+	info.Text               = "Waktu        : -\nPanjang      : -\nDieksplorasi : -"
+	info.TextSize           = 12
+	info.Font               = Enum.Font.Code
+	info.TextXAlignment     = Enum.TextXAlignment.Left
+	info.TextYAlignment     = Enum.TextYAlignment.Top
+	info.Parent             = bg
+
+	return info
+end
+
+-- MODIFIKASI: Posisi block JPS digeser ke bawah (68 + 110 + 12 = 190)
+local astarInfo = makeResultBlock("A* (Biru)",   Color3.fromRGB(80, 160, 255), 68)
+local jpsInfo   = makeResultBlock("JPS (Merah)", Color3.fromRGB(255, 80, 80),  190)
+
+-- ========== TOGGLE PANEL ==========
+local panelOpen = true
+toggleBtn.MouseButton1Click:Connect(function()
+	panelOpen = not panelOpen
+	ctrlFrame.Visible = panelOpen
+	toggleBtn.Text = panelOpen and "x" or "="
+	toggleBtn.BackgroundColor3 = panelOpen
+		and Color3.fromRGB(200, 50, 50)
+		or  Color3.fromRGB(50, 50, 50)
+	if not panelOpen then resFrame.Visible = false end
+end)
+
+-- ========== TERIMA HASIL DARI SERVER ==========
+-- MODIFIKASI: Parameter ke-4 sekarang nodesExplored (bukan memUsed)
+resultEvent.OnClientEvent:Connect(function(algo, execTime, pathLength, nodesExplored, scenarioLabel)
+
+	if algo == "Ready" then
+		statusLabel.Text       = "Status: Siap!"
+		statusLabel.TextColor3 = Color3.fromRGB(0, 255, 100)
+		return
+	end
+
+	if algo == "Reset" then
+		astarInfo.Text   = "Waktu        : -\nPanjang      : -\nDieksplorasi : -"
+		jpsInfo.Text     = "Waktu        : -\nPanjang      : -\nDieksplorasi : -"
+		resFrame.Visible = false
+		statusLabel.Text       = "Status: Memuat ulang grid..."
+		statusLabel.TextColor3 = Color3.fromRGB(255, 200, 0)
+		gridVisible      = false
+		pathAstarVisible = true
+		pathJPSVisible   = true
+		updateGridToggleUI()
+		updatePathAstarUI()
+		updatePathJPSUI()
+		return
+	end
+
+	if algo == "AStar_Failed" or algo == "JPS_Failed" then
+		statusLabel.Text       = "Status: Jalur tidak ditemukan!"
+		statusLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
+		return
+	end
+
+	if algo == "AStar" or algo == "JPS" then
+		if panelOpen then resFrame.Visible = true end
+		statusLabel.Text       = "Status: Selesai!"
+		statusLabel.TextColor3 = Color3.fromRGB(0, 255, 100)
+
+		if scenarioLabel and scenarioLabel ~= "" then
+			resScenarLabel.Text = "Titik: " .. tostring(scenarioLabel)
+		else
+			resScenarLabel.Text = "Titik: Default"
+		end
+
+		-- MODIFIKASI: Format baru tanpa Memori, tampilkan Dieksplorasi
+		local text = string.format(
+			"Waktu        : %.4f ms\nPanjang      : %d node\nDieksplorasi : %d node",
+			execTime or 0, pathLength or 0, nodesExplored or 0
+		)
+
+		if algo == "AStar" then
+			astarInfo.Text = text
+		else
+			jpsInfo.Text = text
+		end
+	end
+end)
