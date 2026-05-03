@@ -1,0 +1,107 @@
+-- NPCMover.lua (versi Dummy)
+
+local Config     = require(game.ReplicatedStorage.Config)
+local GridSystem = require(game.ServerScriptService.GridSystem)
+
+local NPCMover = {}
+
+function NPCMover.spawnNPC(startX, startZ, npcName, color)
+	local npcName = npcName or "PathfinderNPC"
+	local color   = color or BrickColor.new("Bright blue")
+
+	local existing = workspace.NPCs:FindFirstChild(npcName)
+	if existing then existing:Destroy() end
+
+	local dummy = game.ServerStorage:FindFirstChild("NPCDummy")
+	if not dummy then
+		warn("NPCDummy tidak ditemukan di ServerStorage!")
+		return nil
+	end
+
+	local npc = dummy:Clone()
+	npc.Name = npcName
+
+	for _, part in ipairs(npc:GetDescendants()) do
+		if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+			part.BrickColor = color
+			part.CanCollide = false
+		end
+	end
+
+	local root = npc:FindFirstChild("HumanoidRootPart")
+	if root then
+		root.CanCollide = true
+		local worldPos = GridSystem.gridToWorld(startX, startZ)
+		root.CFrame = CFrame.new(worldPos.X, worldPos.Y + 3, worldPos.Z)
+	end
+
+	local humanoid = npc:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.WalkSpeed = Config.NPC_MOVE_SPEED
+	end
+
+	npc.Parent = workspace.NPCs
+	return npc
+end
+
+function NPCMover.followPath(npc, path, algorithmName, onFinished)
+	if not path or #path == 0 then
+		if onFinished then onFinished() end
+		return
+	end
+
+	local humanoid = npc:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+
+	-- Setiap algoritma punya folder sendiri agar tidak saling hapus
+	local folderName = "PathVisual_" .. (algorithmName or npc.Name)
+	local pathFolder = workspace:FindFirstChild(folderName)
+	if pathFolder then pathFolder:Destroy() end
+	pathFolder = Instance.new("Folder")
+	pathFolder.Name = folderName
+	pathFolder.Parent = workspace
+
+	-- Warna jalur berbeda per algoritma
+	local pathColor
+	if algorithmName == "AStar" then
+		pathColor = BrickColor.new("Bright yellow")  -- A* = kuning
+	elseif algorithmName == "JPS" then
+		pathColor = BrickColor.new("Cyan")            -- JPS = cyan
+	else
+		pathColor = BrickColor.new("Bright yellow")
+	end
+
+	for i, node in ipairs(path) do
+		local marker = Instance.new("Part")
+		marker.Size = Vector3.new(Config.CELL_SIZE - 0.5, 0.3, Config.CELL_SIZE - 0.5)
+		local wp = GridSystem.gridToWorld(node.x, node.z)
+		marker.Position = Vector3.new(wp.X, wp.Y + 0.2, wp.Z)
+		marker.Anchored = true
+		marker.CanCollide = false
+		marker.Material = Enum.Material.Neon
+		marker.Transparency = 0.3
+
+		if i == 1 then
+			marker.BrickColor = BrickColor.new("Bright green")  -- start = hijau
+		elseif i == #path then
+			marker.BrickColor = BrickColor.new("Bright red")    -- goal = merah
+		else
+			marker.BrickColor = pathColor
+		end
+
+		marker.Parent = pathFolder
+	end
+
+	-- Gerakkan NPC
+	task.spawn(function()
+		for _, node in ipairs(path) do
+			local worldPos = GridSystem.gridToWorld(node.x, node.z)
+			humanoid:MoveTo(Vector3.new(worldPos.X, worldPos.Y + 3, worldPos.Z))
+			humanoid.MoveToFinished:Wait()
+			task.wait(Config.NPC_STEP_WAIT)
+		end
+		if onFinished then onFinished() end
+	end)
+end
+
+return NPCMover
