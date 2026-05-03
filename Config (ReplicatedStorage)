@@ -1,0 +1,19 @@
+local Config = {
+	MAP_WIDTH  = 724,   -- 1993 - 1309 + 40 padding
+	MAP_DEPTH  = 836,   -- 3645 - 2849 + 40 padding
+	CELL_SIZE  = 4,
+	GRID_WIDTH = 181,   -- 724 / 4
+	GRID_DEPTH = 209,   -- 836 / 4
+	MAP_ORIGIN = Vector3.new(1289, 0, 2829),  -- kiri bawah - 20 padding
+
+	NPC_MOVE_SPEED = 35,
+	NPC_STEP_WAIT  = 0.05,
+
+	SCENARIOS = {
+		S1 = { label = "Skenario 1", startName = "Start",    goalName = "Goal"    },
+		S2 = { label = "Skenario 2", startName = "S2_Start", goalName = "S2_Goal" },
+		S3 = { label = "Skenario 3", startName = "S3_Start", goalName = "S3_Goal" },
+		S4 = { label = "Skenario 4", startName = "S4_Start", goalName = "S4_Goal" },
+	},
+}
+return Config
